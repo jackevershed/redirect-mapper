@@ -17,7 +17,7 @@ import tempfile
 
 # Page configuration
 st.set_page_config(
-    page_title="AI Redirect Mapper",
+    page_title="Jaywing AI Redirect Mapper",
     page_icon="🔗",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -277,7 +277,7 @@ with col_logo:
     st.image("https://d3q27bh1u24u2o.cloudfront.net/news/jay_1.jpg", width=120)
 
 with col_title:
-    st.title("Jaywing AI Redirect Mapper")
+    st.title("AI Redirect Mapper")
     st.markdown("Upload your old and new URL lists, and let AI match them using Gemini 3")
 
 # Sidebar configuration
