@@ -46,6 +46,10 @@ if 'processing' not in st.session_state:
     st.session_state.processing = False
 if 'processing_complete' not in st.session_state:
     st.session_state.processing_complete = False
+if 'auth_required_urls' not in st.session_state:
+    st.session_state.auth_required_urls = []
+if 'credentials' not in st.session_state:
+    st.session_state.credentials = {}
 
 # Checkpoint directory
 CHECKPOINT_DIR = tempfile.gettempdir() + '/redirect_mapper_checkpoints'
@@ -71,8 +75,8 @@ def parse_urls(content):
     lines = content.decode('utf-8').strip().split('\n')
     return [line.strip() for line in lines if line.strip() and not line.startswith('#')]
 
-def fetch_page_content(url, retry_count=0, max_retries=3):
-    """Fetch page content with retry logic"""
+def fetch_page_content(url, retry_count=0, max_retries=3, credentials=None):
+    """Fetch page content with retry logic and authentication support"""
     user_agents = [
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
@@ -85,8 +89,14 @@ def fetch_page_content(url, retry_count=0, max_retries=3):
         'Accept-Language': 'en-US,en;q=0.5',
     }
     
+    # Prepare authentication if credentials provided
+    auth = None
+    if credentials:
+        from requests.auth import HTTPBasicAuth
+        auth = HTTPBasicAuth(credentials['username'], credentials['password'])
+    
     try:
-        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
+        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True, auth=auth)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
@@ -116,14 +126,19 @@ def fetch_page_content(url, retry_count=0, max_retries=3):
     except requests.exceptions.Timeout:
         if retry_count < max_retries:
             time.sleep(2 ** retry_count)
-            return fetch_page_content(url, retry_count + 1, max_retries)
+            return fetch_page_content(url, retry_count + 1, max_retries, credentials)
         return {'url': url, 'title': '', 'heading': '', 'description': '', 'content': '', 
                 'status': 'failed', 'error': 'Timeout'}
         
     except requests.exceptions.HTTPError as e:
+        # Check for authentication errors
+        if e.response.status_code in [401, 403]:
+            return {'url': url, 'title': '', 'heading': '', 'description': '', 'content': '', 
+                    'status': 'auth_required', 'error': f'Authentication required (HTTP {e.response.status_code})'}
+        
         if retry_count < max_retries and e.response.status_code in [429, 500, 502, 503, 504]:
             time.sleep(3 ** retry_count)
-            return fetch_page_content(url, retry_count + 1, max_retries)
+            return fetch_page_content(url, retry_count + 1, max_retries, credentials)
         return {'url': url, 'title': '', 'heading': '', 'description': '', 'content': '', 
                 'status': 'failed', 'error': f'HTTP {e.response.status_code}'}
         
@@ -131,20 +146,26 @@ def fetch_page_content(url, retry_count=0, max_retries=3):
         return {'url': url, 'title': '', 'heading': '', 'description': '', 'content': '', 
                 'status': 'failed', 'error': str(e)[:100]}
 
-def crawl_urls(url_list, progress_bar, status_text):
-    """Crawl URLs with progress updates"""
+def crawl_urls(url_list, progress_bar, status_text, credentials=None):
+    """Crawl URLs with progress updates and authentication support"""
     results = []
+    auth_required = []
     total = len(url_list)
     
     for i, url in enumerate(url_list):
         status_text.text(f"Crawling {i + 1}/{total}: {url[:50]}...")
         progress_bar.progress((i + 1) / total)
         
-        content = fetch_page_content(url)
+        content = fetch_page_content(url, credentials=credentials)
         results.append(content)
+        
+        # Track URLs that require authentication
+        if content['status'] == 'auth_required':
+            auth_required.append(url)
+        
         time.sleep(1.0)
     
-    return results
+    return results, auth_required
 
 def match_urls(client, model_name, old_data, new_data, crawled, progress_bar, status_text):
     """Match URLs using Gemini API"""
@@ -250,8 +271,14 @@ def export_csv(matches):
     return output.getvalue()
 
 # Main UI
-st.title("AI Redirect Mapper")
-st.markdown("Upload your old and new URL lists, let AI match them intelligently using Gemini 3")
+col_logo, col_title = st.columns([1, 5])
+
+with col_logo:
+    st.image("https://d3q27bh1u24u2o.cloudfront.net/news/jay_1.jpg", width=120)
+
+with col_title:
+    st.title("Jaywing AI Redirect Mapper")
+    st.markdown("Upload your old and new URL lists, and let AI match them using Gemini 3")
 
 # Sidebar configuration
 with st.sidebar:
@@ -277,6 +304,21 @@ with st.sidebar:
         "Crawl page content",
         help="Fetch actual page content for more accurate matching. Slower but much better results."
     )
+    
+    # Authentication section
+    with st.expander("Authentication (Optional)", expanded=False):
+        st.caption("Provide credentials if your URLs require authentication")
+        auth_username = st.text_input("Username", key="auth_user")
+        auth_password = st.text_input("Password", type="password", key="auth_pass")
+        
+        if auth_username and auth_password:
+            st.session_state.credentials = {
+                'username': auth_username,
+                'password': auth_password
+            }
+            st.success("Credentials configured")
+        else:
+            st.session_state.credentials = {}
     
     st.divider()
     
@@ -330,6 +372,7 @@ if st.button("Start Matching", type="primary", disabled=start_button_disabled):
         st.session_state.processing = True
         st.session_state.processing_complete = False
         st.session_state.matches = []  # Clear previous results
+        st.session_state.auth_required_urls = []  # Clear previous auth errors
         
         try:
             # Initialize client
@@ -339,6 +382,9 @@ if st.button("Start Matching", type="primary", disabled=start_button_disabled):
             if crawl_enabled:
                 st.header("Crawling Pages")
                 
+                # Get credentials if provided
+                creds = st.session_state.credentials if st.session_state.credentials else None
+                
                 crawl_container = st.container()
                 with crawl_container:
                     col1, col2 = st.columns(2)
@@ -347,19 +393,41 @@ if st.button("Start Matching", type="primary", disabled=start_button_disabled):
                         st.subheader("Old URLs")
                         progress_old = st.progress(0)
                         status_old = st.empty()
-                        st.session_state.crawl_results_old = crawl_urls(old_urls, progress_old, status_old)
+                        crawl_old_results, auth_old = crawl_urls(old_urls, progress_old, status_old, creds)
+                        st.session_state.crawl_results_old = crawl_old_results
                         status_old.empty()  # Clear status after completion
+                        
                         successful_old = sum(1 for r in st.session_state.crawl_results_old if r['status'] == 'success')
+                        auth_required_old = sum(1 for r in st.session_state.crawl_results_old if r['status'] == 'auth_required')
+                        
                         st.success(f"Crawled {successful_old}/{len(old_urls)} old URLs successfully")
+                        if auth_required_old > 0:
+                            st.warning(f"{auth_required_old} URLs require authentication")
+                            st.session_state.auth_required_urls.extend(auth_old)
                     
                     with col2:
                         st.subheader("New URLs")
                         progress_new = st.progress(0)
                         status_new = st.empty()
-                        st.session_state.crawl_results_new = crawl_urls(new_urls, progress_new, status_new)
+                        crawl_new_results, auth_new = crawl_urls(new_urls, progress_new, status_new, creds)
+                        st.session_state.crawl_results_new = crawl_new_results
                         status_new.empty()  # Clear status after completion
+                        
                         successful_new = sum(1 for r in st.session_state.crawl_results_new if r['status'] == 'success')
+                        auth_required_new = sum(1 for r in st.session_state.crawl_results_new if r['status'] == 'auth_required')
+                        
                         st.success(f"Crawled {successful_new}/{len(new_urls)} new URLs successfully")
+                        if auth_required_new > 0:
+                            st.warning(f"{auth_required_new} URLs require authentication")
+                            st.session_state.auth_required_urls.extend(auth_new)
+                
+                # Show authentication warning if needed
+                if len(st.session_state.auth_required_urls) > 0:
+                    st.error(f"⚠️ {len(st.session_state.auth_required_urls)} URLs require authentication and could not be crawled.")
+                    with st.expander("View URLs requiring authentication"):
+                        for url in st.session_state.auth_required_urls:
+                            st.code(url)
+                    st.info("💡 To crawl these URLs: Add credentials in the sidebar under 'Authentication (Optional)' and re-run the matching process.")
                 
                 old_data = st.session_state.crawl_results_old
                 new_data = st.session_state.crawl_results_new
@@ -406,6 +474,10 @@ if len(st.session_state.matches) > 0:
     
     with results_anchor:
         st.header("✓ Results")
+        
+        # Show authentication warning if applicable
+        if len(st.session_state.auth_required_urls) > 0:
+            st.warning(f"⚠️ Note: {len(st.session_state.auth_required_urls)} URLs were excluded from matching due to authentication requirements.")
         
         # Summary stats
         high_conf = sum(1 for m in st.session_state.matches if m['confidence'] >= 0.8)
@@ -463,4 +535,4 @@ if len(st.session_state.matches) > 0:
 
 # Footer
 st.divider()
-st.caption("Powered by Gemini 3 | Checkpoints saved to temp directory for recovery")
+st.caption("Powered by Gemini 3 | Jack Evershed")
