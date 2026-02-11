@@ -23,6 +23,18 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+# Custom CSS to ensure scrolling works
+st.markdown("""
+    <style>
+    .main {
+        overflow-y: auto !important;
+    }
+    section[data-testid="stSidebar"] {
+        overflow-y: auto !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
 # Initialize session state
 if 'matches' not in st.session_state:
     st.session_state.matches = []
@@ -32,6 +44,8 @@ if 'crawl_results_new' not in st.session_state:
     st.session_state.crawl_results_new = []
 if 'processing' not in st.session_state:
     st.session_state.processing = False
+if 'processing_complete' not in st.session_state:
+    st.session_state.processing_complete = False
 
 # Checkpoint directory
 CHECKPOINT_DIR = tempfile.gettempdir() + '/redirect_mapper_checkpoints'
@@ -301,13 +315,21 @@ with col2:
 st.divider()
 
 # Start matching button
-if st.button("Start Matching", type="primary", disabled=st.session_state.processing):
+start_button_disabled = st.session_state.processing or not (old_file and new_file and api_key)
+
+# Show completion message if processing just finished
+if st.session_state.processing_complete and len(st.session_state.matches) > 0:
+    st.success("✓ Processing complete! Scroll down to see results and download CSV.")
+
+if st.button("Start Matching", type="primary", disabled=start_button_disabled):
     if not api_key:
         st.error("Please enter your Google AI Studio API key in the sidebar")
     elif not old_file or not new_file:
         st.error("Please upload both old and new URL files")
     else:
         st.session_state.processing = True
+        st.session_state.processing_complete = False
+        st.session_state.matches = []  # Clear previous results
         
         try:
             # Initialize client
@@ -317,23 +339,27 @@ if st.button("Start Matching", type="primary", disabled=st.session_state.process
             if crawl_enabled:
                 st.header("Crawling Pages")
                 
-                col1, col2 = st.columns(2)
-                
-                with col1:
-                    st.subheader("Old URLs")
-                    progress_old = st.progress(0)
-                    status_old = st.empty()
-                    st.session_state.crawl_results_old = crawl_urls(old_urls, progress_old, status_old)
-                    successful_old = sum(1 for r in st.session_state.crawl_results_old if r['status'] == 'success')
-                    st.success(f"Crawled {successful_old}/{len(old_urls)} old URLs successfully")
-                
-                with col2:
-                    st.subheader("New URLs")
-                    progress_new = st.progress(0)
-                    status_new = st.empty()
-                    st.session_state.crawl_results_new = crawl_urls(new_urls, progress_new, status_new)
-                    successful_new = sum(1 for r in st.session_state.crawl_results_new if r['status'] == 'success')
-                    st.success(f"Crawled {successful_new}/{len(new_urls)} new URLs successfully")
+                crawl_container = st.container()
+                with crawl_container:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.subheader("Old URLs")
+                        progress_old = st.progress(0)
+                        status_old = st.empty()
+                        st.session_state.crawl_results_old = crawl_urls(old_urls, progress_old, status_old)
+                        status_old.empty()  # Clear status after completion
+                        successful_old = sum(1 for r in st.session_state.crawl_results_old if r['status'] == 'success')
+                        st.success(f"Crawled {successful_old}/{len(old_urls)} old URLs successfully")
+                    
+                    with col2:
+                        st.subheader("New URLs")
+                        progress_new = st.progress(0)
+                        status_new = st.empty()
+                        st.session_state.crawl_results_new = crawl_urls(new_urls, progress_new, status_new)
+                        status_new.empty()  # Clear status after completion
+                        successful_new = sum(1 for r in st.session_state.crawl_results_new if r['status'] == 'success')
+                        st.success(f"Crawled {successful_new}/{len(new_urls)} new URLs successfully")
                 
                 old_data = st.session_state.crawl_results_old
                 new_data = st.session_state.crawl_results_new
@@ -342,71 +368,98 @@ if st.button("Start Matching", type="primary", disabled=st.session_state.process
                 new_data = new_urls
             
             # Matching phase
-            st.header("Matching URLs with AI")
-            progress_match = st.progress(0)
-            status_match = st.empty()
+            match_container = st.container()
+            with match_container:
+                st.header("Matching URLs with AI")
+                progress_match = st.progress(0)
+                status_match = st.empty()
+                
+                st.session_state.matches = match_urls(
+                    client, 
+                    model_choice, 
+                    old_data, 
+                    new_data, 
+                    crawl_enabled,
+                    progress_match,
+                    status_match
+                )
+                
+                status_match.empty()  # Clear status after completion
+                st.success(f"Matching complete! Found {len(st.session_state.matches)} matches")
             
-            st.session_state.matches = match_urls(
-                client, 
-                model_choice, 
-                old_data, 
-                new_data, 
-                crawl_enabled,
-                progress_match,
-                status_match
-            )
-            
-            st.success(f"Matching complete! Found {len(st.session_state.matches)} matches")
+            st.session_state.processing_complete = True
             
         except Exception as e:
             st.error(f"Error: {str(e)}")
+            st.session_state.processing_complete = False
         finally:
             st.session_state.processing = False
+            # Force rerun to show results
+            st.rerun()
 
 # Display results
-if st.session_state.matches:
+if len(st.session_state.matches) > 0:
     st.divider()
-    st.header("Results")
     
-    # Summary stats
-    high_conf = sum(1 for m in st.session_state.matches if m['confidence'] >= 0.8)
-    medium_conf = sum(1 for m in st.session_state.matches if 0.6 <= m['confidence'] < 0.8)
-    low_conf = sum(1 for m in st.session_state.matches if m['confidence'] < 0.6)
+    # Add a marker to ensure we can scroll to results
+    results_anchor = st.container()
     
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Total Matches", len(st.session_state.matches))
-    col2.metric("High Confidence (80%+)", high_conf)
-    col3.metric("Medium Confidence (60-80%)", medium_conf)
-    col4.metric("Low Confidence (<60%)", low_conf)
-    
-    # Preview matches
-    st.subheader("Preview Matches")
-    preview_count = min(10, len(st.session_state.matches))
-    
-    for i, match in enumerate(st.session_state.matches[:preview_count], 1):
-        with st.expander(f"Match {i} - Confidence: {int(match['confidence']*100)}%"):
-            col1, col2 = st.columns(2)
-            with col1:
-                st.text("Old URL:")
-                st.code(match['oldUrl'])
-            with col2:
-                st.text("New URL:")
-                st.code(match['newUrl'])
-            st.caption(f"Reason: {match['reason']}")
-    
-    if len(st.session_state.matches) > preview_count:
-        st.caption(f"... and {len(st.session_state.matches) - preview_count} more matches")
-    
-    # Download button
-    st.divider()
-    csv_data = export_csv(st.session_state.matches)
-    st.download_button(
-        label="Download CSV",
-        data=csv_data,
-        file_name=f"redirects_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        mime="text/csv",
-        type="primary"
-    )
+    with results_anchor:
+        st.header("✓ Results")
+        
+        # Summary stats
+        high_conf = sum(1 for m in st.session_state.matches if m['confidence'] >= 0.8)
+        medium_conf = sum(1 for m in st.session_state.matches if 0.6 <= m['confidence'] < 0.8)
+        low_conf = sum(1 for m in st.session_state.matches if m['confidence'] < 0.6)
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Matches", len(st.session_state.matches))
+        col2.metric("High Confidence (80%+)", high_conf)
+        col3.metric("Medium Confidence (60-80%)", medium_conf)
+        col4.metric("Low Confidence (<60%)", low_conf)
+        
+        # Download button at top
+        st.subheader("Download Results")
+        csv_data = export_csv(st.session_state.matches)
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv_data,
+            file_name=f"redirects_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True
+        )
+        
+        # Preview matches
+        st.subheader("Preview Matches")
+        preview_count = min(10, len(st.session_state.matches))
+        
+        for i, match in enumerate(st.session_state.matches[:preview_count], 1):
+            with st.expander(f"Match {i} - Confidence: {int(match['confidence']*100)}%"):
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.text("Old URL:")
+                    st.code(match['oldUrl'])
+                with col2:
+                    st.text("New URL:")
+                    st.code(match['newUrl'])
+                st.caption(f"Reason: {match['reason']}")
+        
+        if len(st.session_state.matches) > preview_count:
+            st.caption(f"... and {len(st.session_state.matches) - preview_count} more matches")
+        
+        # Download button at bottom too
+        st.divider()
+        csv_data_bottom = export_csv(st.session_state.matches)
+        st.download_button(
+            label="📥 Download CSV",
+            data=csv_data_bottom,
+            file_name=f"redirects_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+            mime="text/csv",
+            type="primary",
+            use_container_width=True,
+            key="download_bottom"
+        )
 
 # Footer
 st.divider()
