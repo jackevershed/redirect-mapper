@@ -271,17 +271,12 @@ def export_csv(matches):
     return output.getvalue()
 
 # Main UI
-col_logo, col_title = st.columns([1, 5])
-
-with col_logo:
-    st.image("https://d3q27bh1u24u2o.cloudfront.net/news/jay_1.jpg", width=120)
-
-with col_title:
-    st.title("AI Redirect Mapper")
-    st.markdown("Upload your old and new URL lists, and let AI match them using Gemini 3")
+st.title("AI Redirect Mapper")
+st.markdown("Upload your old and new URL lists, and let AI match them using Gemini 3")
 
 # Sidebar configuration
 with st.sidebar:
+    st.image("https://d3q27bh1u24u2o.cloudfront.net/news/jay_1.jpg", width=120)
     st.header("Configuration")
     
     api_key = st.text_input("Google AI Studio API Key", type="password", 
